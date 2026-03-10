@@ -8,89 +8,77 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 
-# Page Config
-st.set_page_config(page_title="Gemini PDF Bot", page_icon="🤖")
+st.set_page_config(page_title="Gemini Assignment Bot", page_icon="🤖")
 st.header("🤖 Useful AI Document Bot")
 
 # --- Sidebar ---
 with st.sidebar:
     st.title("Configuration")
-    # Link to get key: https://aistudio.google.com/app/apikey
+    # You can also use st.secrets["GOOGLE_API_KEY"] if set in Streamlit Cloud
     gemini_api_key = st.text_input("Gemini API Key", type="password")
+    st.info("Get a free key at: https://aistudio.google.com/app/apikey")
     
     st.divider()
-    file = st.file_uploader("Upload your PDF Assignment", type="pdf")
+    file = st.file_uploader("Upload your PDF", type="pdf")
 
 if file and gemini_api_key:
-    # 1. Extract Text from PDF
+    # 1. Extract Text
     pdf_reader = PdfReader(file)
-    text = ""
-    for page in pdf_reader.pages:
-        extracted = page.extract_text()
-        if extracted:
-            text += extracted
+    text = "".join([page.extract_text() for page in pdf_reader.pages if page.extract_text()])
 
-    # 2. Split Text into manageable chunks
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=2000,
-        chunk_overlap=250
-    )
+    # 2. Split Text (Smaller chunks help with rate limits)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
     chunks = text_splitter.split_text(text)
 
-    # 3. Setup Gemini Embeddings and Vector Store
-    # This converts text into numbers so the bot can 'search' the PDF
+    # 3. Embedding Logic with Batching to avoid Quota Errors
     embeddings = GoogleGenerativeAIEmbeddings(
         model="models/embedding-001", 
         google_api_key=gemini_api_key
     )
     
     @st.cache_resource(show_spinner=False)
-    def create_vc(_chunks, _key):
-        return FAISS.from_texts(_chunks, embeddings)
+    def create_vector_store(_chunks, _key):
+        try:
+            # We process in batches of 5 to avoid "Resource Exhausted" errors
+            batch_size = 5
+            vector_store = None
+            
+            progress_bar = st.progress(0)
+            for i in range(0, len(_chunks), batch_size):
+                batch = _chunks[i : i + batch_size]
+                if vector_store is None:
+                    vector_store = FAISS.from_texts(batch, embeddings)
+                else:
+                    vector_store.add_texts(batch)
+                
+                # Sleep briefly to respect the free-tier quota
+                time.sleep(0.5) 
+                progress_bar.progress(min((i + batch_size) / len(_chunks), 1.0))
+            
+            return vector_store
+        except Exception as e:
+            st.error(f"Failed to create vector store: {e}")
+            return None
 
-    vector_store = create_vc(chunks, gemini_api_key)
+    vector_store = create_vector_store(chunks, gemini_api_key)
 
-    # 4. Setup Gemini LLM (1.5 Flash is fast and free)
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-1.5-flash", 
-        temperature=0, 
-        google_api_key=gemini_api_key
-    )
+    if vector_store:
+        # 4. LLM & Prompt
+        llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0, google_api_key=gemini_api_key)
 
-    # --- PROMPT ENGINEERING TECHNIQUES ---
-    # We use: Role Prompting, Chain of Thought (CoT), and Negative Constraints
-    prompt = ChatPromptTemplate.from_messages([
-        ("system",
-         "You are a highly skilled academic assistant. Answer the user's question using ONLY the context provided.\n\n"
-         "INSTRUCTIONS:\n"
-         "1. Summarize the relevant facts from the document.\n"
-         "2. Reason step-by-step how these facts answer the question.\n"
-         "3. If the answer is NOT in the document, say: 'I'm sorry, that information is not in the uploaded PDF.'\n\n"
-         "Context:\n{context}"),
-        ("human", "{question}")
-    ])
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", "You are a professional assistant. Use the context to answer the question. If unsure, say you don't know.\n\nContext:\n{context}"),
+            ("human", "{question}")
+        ])
 
-    # 5. Build the Chain
-    retriever = vector_store.as_retriever()
-    
-    def format_docs(docs):
-        return "\n\n".join([doc.page_content for doc in docs])
+        chain = ({"context": vector_store.as_retriever() | (lambda docs: "\n\n".join([d.page_content for d in docs])), 
+                  "question": RunnablePassthrough()} 
+                 | prompt | llm | StrOutputParser())
 
-    chain = (
-        {"context": retriever | format_docs, "question": RunnablePassthrough()}
-        | prompt
-        | llm
-        | StrOutputParser()
-    )
-
-    # 6. User Interaction
-    user_query = st.text_input("Ask a question about your document:")
-
-    if user_query:
-        with st.spinner("Gemini is thinking..."):
-            response = chain.invoke(user_query)
-            st.markdown("### ✅ Bot Response:")
-            st.write(response)
+        user_query = st.text_input("Ask a question:")
+        if user_query:
+            with st.spinner("Thinking..."):
+                st.write(chain.invoke(user_query))
 
 elif not gemini_api_key:
-    st.warning("Please enter your Gemini API Key in the sidebar to begin.")
+    st.warning("Please enter your Gemini API Key in the sidebar.")
