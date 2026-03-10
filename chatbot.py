@@ -14,7 +14,6 @@ st.header("🤖 Useful AI Document Bot")
 # --- Sidebar ---
 with st.sidebar:
     st.title("Configuration")
-    # You can also use st.secrets["GOOGLE_API_KEY"] if set in Streamlit Cloud
     gemini_api_key = st.text_input("Gemini API Key", type="password")
     st.info("Get a free key at: https://aistudio.google.com/app/apikey")
     
@@ -30,16 +29,16 @@ if file and gemini_api_key:
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
     chunks = text_splitter.split_text(text)
 
-    # 3. Embedding Logic with Batching to avoid Quota Errors
+    # 3. Embedding Logic with Batching
+    # FIX APPLIED: Using the active "gemini-embedding-001" model
     embeddings = GoogleGenerativeAIEmbeddings(
-        model="models/embedding-001", 
+        model="models/gemini-embedding-001", 
         google_api_key=gemini_api_key
     )
     
     @st.cache_resource(show_spinner=False)
     def create_vector_store(_chunks, _key):
         try:
-            # We process in batches of 5 to avoid "Resource Exhausted" errors
             batch_size = 5
             vector_store = None
             
@@ -64,10 +63,21 @@ if file and gemini_api_key:
 
     if vector_store:
         # 4. LLM & Prompt
-        llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0, google_api_key=gemini_api_key)
+        # FIX APPLIED: Using the modern "gemini-2.5-flash" model
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash", 
+            temperature=0, 
+            google_api_key=gemini_api_key
+        )
 
+        # Prompt Engineering Requirements for the Assignment
         prompt = ChatPromptTemplate.from_messages([
-            ("system", "You are a professional assistant. Use the context to answer the question. If unsure, say you don't know.\n\nContext:\n{context}"),
+            ("system", "You are a professional assistant. Answer the user's question using ONLY the context provided.\n\n"
+             "INSTRUCTIONS:\n"
+             "1. Think step-by-step about how the context relates to the question.\n"
+             "2. Provide a concise answer.\n"
+             "3. If the answer is not in the text, say 'I cannot find this in the document.'\n\n"
+             "Context:\n{context}"),
             ("human", "{question}")
         ])
 
@@ -75,9 +85,10 @@ if file and gemini_api_key:
                   "question": RunnablePassthrough()} 
                  | prompt | llm | StrOutputParser())
 
-        user_query = st.text_input("Ask a question:")
+        user_query = st.text_input("Ask a question about your PDF:")
         if user_query:
             with st.spinner("Thinking..."):
+                st.write("### ✅ Response:")
                 st.write(chain.invoke(user_query))
 
 elif not gemini_api_key:
